@@ -6,18 +6,23 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/juanfont/headscale/hscontrol/types"
+	"github.com/juanfont/headscale/hscontrol/util"
 	"github.com/stretchr/testify/assert"
 	"gorm.io/gorm"
+	"zgo.at/zcache/v2"
 )
 
 func TestMigrations(t *testing.T) {
-	ipp := func(p string) types.IPPrefix {
-		return types.IPPrefix(netip.MustParsePrefix(p))
+	ipp := func(p string) netip.Prefix {
+		return netip.MustParsePrefix(p)
 	}
 	r := func(id uint64, p string, a, e, i bool) types.Route {
 		return types.Route{
@@ -54,9 +59,7 @@ func TestMigrations(t *testing.T) {
 					r(31, "::/0", true, false, false),
 					r(32, "192.168.0.24/32", true, true, true),
 				}
-				if diff := cmp.Diff(want, routes, cmpopts.IgnoreFields(types.Route{}, "Model", "Node"), cmp.Comparer(func(x, y types.IPPrefix) bool {
-					return x == y
-				})); diff != "" {
+				if diff := cmp.Diff(want, routes, cmpopts.IgnoreFields(types.Route{}, "Model", "Node"), util.PrefixComparer); diff != "" {
 					t.Errorf("TestMigrations() mismatch (-want +got):\n%s", diff)
 				}
 			},
@@ -101,10 +104,93 @@ func TestMigrations(t *testing.T) {
 					r(13, "::/0", true, true, false),
 					r(13, "10.18.80.2/32", true, true, true),
 				}
-				if diff := cmp.Diff(want, routes, cmpopts.IgnoreFields(types.Route{}, "Model", "Node"), cmp.Comparer(func(x, y types.IPPrefix) bool {
-					return x == y
-				})); diff != "" {
+				if diff := cmp.Diff(want, routes, cmpopts.IgnoreFields(types.Route{}, "Model", "Node"), util.PrefixComparer); diff != "" {
 					t.Errorf("TestMigrations() mismatch (-want +got):\n%s", diff)
+				}
+			},
+		},
+		// at 14:15:06 ❯ go run ./cmd/headscale preauthkeys list
+		// ID | Key      | Reusable | Ephemeral | Used  | Expiration | Created    | Tags
+		// 1  | 09b28f.. | false    | false     | false | 2024-09-27 | 2024-09-27 | tag:derp
+		// 2  | 3112b9.. | false    | false     | false | 2024-09-27 | 2024-09-27 | tag:derp
+		// 3  | 7c23b9.. | false    | false     | false | 2024-09-27 | 2024-09-27 | tag:derp,tag:merp
+		// 4  | f20155.. | false    | false     | false | 2024-09-27 | 2024-09-27 | tag:test
+		// 5  | b212b9.. | false    | false     | false | 2024-09-27 | 2024-09-27 | tag:test,tag:woop,tag:dedu
+		{
+			dbPath: "testdata/0-23-0-to-0-24-0-preauthkey-tags-table.sqlite",
+			wantFunc: func(t *testing.T, h *HSDatabase) {
+				keys, err := Read(h.DB, func(rx *gorm.DB) ([]types.PreAuthKey, error) {
+					kratest, err := ListPreAuthKeys(rx, "kratest")
+					if err != nil {
+						return nil, err
+					}
+
+					testkra, err := ListPreAuthKeys(rx, "testkra")
+					if err != nil {
+						return nil, err
+					}
+
+					return append(kratest, testkra...), nil
+				})
+				assert.NoError(t, err)
+
+				assert.Len(t, keys, 5)
+				want := []types.PreAuthKey{
+					{
+						ID:   1,
+						Tags: []string{"tag:derp"},
+					},
+					{
+						ID:   2,
+						Tags: []string{"tag:derp"},
+					},
+					{
+						ID:   3,
+						Tags: []string{"tag:derp", "tag:merp"},
+					},
+					{
+						ID:   4,
+						Tags: []string{"tag:test"},
+					},
+					{
+						ID:   5,
+						Tags: []string{"tag:test", "tag:woop", "tag:dedu"},
+					},
+				}
+
+				if diff := cmp.Diff(want, keys, cmp.Comparer(func(a, b []string) bool {
+					sort.Sort(sort.StringSlice(a))
+					sort.Sort(sort.StringSlice(b))
+					return slices.Equal(a, b)
+				}), cmpopts.IgnoreFields(types.PreAuthKey{}, "Key", "UserID", "User", "CreatedAt", "Expiration")); diff != "" {
+					t.Errorf("TestMigrations() mismatch (-want +got):\n%s", diff)
+				}
+
+				if h.DB.Migrator().HasTable("pre_auth_key_acl_tags") {
+					t.Errorf("TestMigrations() table pre_auth_key_acl_tags should not exist")
+				}
+			},
+		},
+		{
+			dbPath: "testdata/0-23-0-to-0-24-0-no-more-special-types.sqlite",
+			wantFunc: func(t *testing.T, h *HSDatabase) {
+				nodes, err := Read(h.DB, func(rx *gorm.DB) (types.Nodes, error) {
+					return ListNodes(rx)
+				})
+				assert.NoError(t, err)
+
+				for _, node := range nodes {
+					assert.Falsef(t, node.MachineKey.IsZero(), "expected non zero machinekey")
+					assert.Contains(t, node.MachineKey.String(), "mkey:")
+					assert.Falsef(t, node.NodeKey.IsZero(), "expected non zero nodekey")
+					assert.Contains(t, node.NodeKey.String(), "nodekey:")
+					assert.Falsef(t, node.DiscoKey.IsZero(), "expected non zero discokey")
+					assert.Contains(t, node.DiscoKey.String(), "discokey:")
+					assert.NotNil(t, node.IPv4)
+					assert.NotNil(t, node.IPv4)
+					assert.Len(t, node.Endpoints, 1)
+					assert.NotNil(t, node.Hostinfo)
+					assert.NotNil(t, node.MachineKey)
 				}
 			},
 		},
@@ -122,7 +208,7 @@ func TestMigrations(t *testing.T) {
 				Sqlite: types.SqliteConfig{
 					Path: dbPath,
 				},
-			}, "")
+			}, "", emptyCache())
 			if err != nil && tt.wantErr != err.Error() {
 				t.Errorf("TestMigrations() unexpected error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -165,4 +251,8 @@ func testCopyOfDatabase(src string) (string, error) {
 	defer destination.Close()
 	_, err = io.Copy(destination, source)
 	return dst, err
+}
+
+func emptyCache() *zcache.Cache[string, types.Node] {
+	return zcache.New[string, types.Node](time.Minute, time.Hour)
 }

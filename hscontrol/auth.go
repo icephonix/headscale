@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/juanfont/headscale/hscontrol/db"
@@ -18,6 +17,11 @@ import (
 	"tailscale.com/types/key"
 	"tailscale.com/types/ptr"
 )
+
+type AuthProvider interface {
+	RegisterHandler(http.ResponseWriter, *http.Request)
+	AuthURL(key.MachinePublic) string
+}
 
 func logAuthFunc(
 	registerRequest tailcfg.RegisterRequest,
@@ -66,7 +70,7 @@ func (h *Headscale) handleRegister(
 	regReq tailcfg.RegisterRequest,
 	machineKey key.MachinePublic,
 ) {
-	logInfo, logTrace, logErr := logAuthFunc(regReq, machineKey)
+	logInfo, logTrace, _ := logAuthFunc(regReq, machineKey)
 	now := time.Now().UTC()
 	logTrace("handleRegister called, looking up machine in DB")
 	node, err := h.db.GetNodeByAnyKey(machineKey, regReq.NodeKey, regReq.OldNodeKey)
@@ -105,16 +109,6 @@ func (h *Headscale) handleRegister(
 
 		logInfo("Node not found in database, creating new")
 
-		givenName, err := h.db.GenerateGivenName(
-			machineKey,
-			regReq.Hostinfo.Hostname,
-		)
-		if err != nil {
-			logErr(err, "Failed to generate given name for node")
-
-			return
-		}
-
 		// The node did not have a key to authenticate, which means
 		// that we rely on a method that calls back some how (OpenID or CLI)
 		// We create the node and then keep it around until a callback
@@ -122,7 +116,6 @@ func (h *Headscale) handleRegister(
 		newNode := types.Node{
 			MachineKey: machineKey,
 			Hostname:   regReq.Hostinfo.Hostname,
-			GivenName:  givenName,
 			NodeKey:    regReq.NodeKey,
 			LastSeen:   &now,
 			Expiry:     &time.Time{},
@@ -136,7 +129,6 @@ func (h *Headscale) handleRegister(
 		h.registrationCache.Set(
 			machineKey.String(),
 			newNode,
-			registerCacheExpiration,
 		)
 
 		h.handleNewNode(writer, regReq, machineKey)
@@ -175,7 +167,7 @@ func (h *Headscale) handleRegister(
 			//   https://github.com/tailscale/tailscale/blob/main/tailcfg/tailcfg.go#L648
 			if !regReq.Expiry.IsZero() &&
 				regReq.Expiry.UTC().Before(now) {
-				h.handleNodeLogOut(writer, *node, machineKey)
+				h.handleNodeLogOut(writer, *node)
 
 				return
 			}
@@ -183,7 +175,7 @@ func (h *Headscale) handleRegister(
 			// If node is not expired, and it is register, we have a already accepted this node,
 			// let it proceed with a valid registration
 			if !node.IsExpired() {
-				h.handleNodeWithValidRegistration(writer, *node, machineKey)
+				h.handleNodeWithValidRegistration(writer, *node)
 
 				return
 			}
@@ -196,7 +188,6 @@ func (h *Headscale) handleRegister(
 				writer,
 				regReq,
 				*node,
-				machineKey,
 			)
 
 			return
@@ -209,7 +200,6 @@ func (h *Headscale) handleRegister(
 				writer,
 				regReq,
 				*node,
-				machineKey,
 			)
 
 			return
@@ -237,7 +227,6 @@ func (h *Headscale) handleRegister(
 		h.registrationCache.Set(
 			machineKey.String(),
 			*node,
-			registerCacheExpiration,
 		)
 
 		return
@@ -354,21 +343,8 @@ func (h *Headscale) handleAuthKey(
 	} else {
 		now := time.Now().UTC()
 
-		givenName, err := h.db.GenerateGivenName(machineKey, registerRequest.Hostinfo.Hostname)
-		if err != nil {
-			log.Error().
-				Caller().
-				Str("func", "RegistrationHandler").
-				Str("hostinfo.name", registerRequest.Hostinfo.Hostname).
-				Err(err).
-				Msg("Failed to generate given name for node")
-
-			return
-		}
-
 		nodeToRegister := types.Node{
 			Hostname:       registerRequest.Hostinfo.Hostname,
-			GivenName:      givenName,
 			UserID:         pak.User.ID,
 			User:           pak.User,
 			MachineKey:     machineKey,
@@ -410,7 +386,7 @@ func (h *Headscale) handleAuthKey(
 		}
 	}
 
-	h.db.Write(func(tx *gorm.DB) error {
+	err = h.db.Write(func(tx *gorm.DB) error {
 		return db.UsePreAuthKey(tx, pak)
 	})
 	if err != nil {
@@ -471,17 +447,7 @@ func (h *Headscale) handleNewNode(
 	// The node registration is new, redirect the client to the registration URL
 	logTrace("The node seems to be new, sending auth url")
 
-	if h.oauth2Config != nil {
-		resp.AuthURL = fmt.Sprintf(
-			"%s/oidc/register/%s",
-			strings.TrimSuffix(h.cfg.ServerURL, "/"),
-			machineKey.String(),
-		)
-	} else {
-		resp.AuthURL = fmt.Sprintf("%s/register/%s",
-			strings.TrimSuffix(h.cfg.ServerURL, "/"),
-			machineKey.String())
-	}
+	resp.AuthURL = h.authProvider.AuthURL(machineKey)
 
 	respBody, err := json.Marshal(resp)
 	if err != nil {
@@ -504,7 +470,6 @@ func (h *Headscale) handleNewNode(
 func (h *Headscale) handleNodeLogOut(
 	writer http.ResponseWriter,
 	node types.Node,
-	machineKey key.MachinePublic,
 ) {
 	resp := tailcfg.RegisterResponse{}
 
@@ -587,7 +552,6 @@ func (h *Headscale) handleNodeLogOut(
 func (h *Headscale) handleNodeWithValidRegistration(
 	writer http.ResponseWriter,
 	node types.Node,
-	machineKey key.MachinePublic,
 ) {
 	resp := tailcfg.RegisterResponse{}
 
@@ -633,7 +597,6 @@ func (h *Headscale) handleNodeKeyRefresh(
 	writer http.ResponseWriter,
 	registerRequest tailcfg.RegisterRequest,
 	node types.Node,
-	machineKey key.MachinePublic,
 ) {
 	resp := tailcfg.RegisterResponse{}
 
@@ -709,15 +672,7 @@ func (h *Headscale) handleNodeExpiredOrLoggedOut(
 		Str("node_key_old", regReq.OldNodeKey.ShortString()).
 		Msg("Node registration has expired or logged out. Sending a auth url to register")
 
-	if h.oauth2Config != nil {
-		resp.AuthURL = fmt.Sprintf("%s/oidc/register/%s",
-			strings.TrimSuffix(h.cfg.ServerURL, "/"),
-			machineKey.String())
-	} else {
-		resp.AuthURL = fmt.Sprintf("%s/register/%s",
-			strings.TrimSuffix(h.cfg.ServerURL, "/"),
-			machineKey.String())
-	}
+	resp.AuthURL = h.authProvider.AuthURL(machineKey)
 
 	respBody, err := json.Marshal(resp)
 	if err != nil {

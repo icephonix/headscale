@@ -3,6 +3,7 @@ package policy
 import (
 	"errors"
 	"net/netip"
+	"slices"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go4.org/netipx"
 	"gopkg.in/check.v1"
+	"tailscale.com/net/tsaddr"
 	"tailscale.com/tailcfg"
 )
 
@@ -341,7 +343,7 @@ func TestParsing(t *testing.T) {
 			],
 		},
 	],
-}			
+}
 `,
 			want: []tailcfg.FilterRule{
 				{
@@ -634,25 +636,6 @@ func Test_expandGroup(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "Expand emails in group strip domains",
-			field: field{
-				pol: ACLPolicy{
-					Groups: Groups{
-						"group:admin": []string{
-							"joe.bar@gmail.com",
-							"john.doe@yahoo.fr",
-						},
-					},
-				},
-			},
-			args: args{
-				group:      "group:admin",
-				stripEmail: true,
-			},
-			want:    []string{"joe.bar", "john.doe"},
-			wantErr: false,
-		},
-		{
 			name: "Expand emails in group",
 			field: field{
 				pol: ACLPolicy{
@@ -667,7 +650,7 @@ func Test_expandGroup(t *testing.T) {
 			args: args{
 				group: "group:admin",
 			},
-			want:    []string{"joe.bar.gmail.com", "john.doe.yahoo.fr"},
+			want:    []string{"joe.bar@gmail.com", "john.doe@yahoo.fr"},
 			wantErr: false,
 		},
 	}
@@ -1998,7 +1981,7 @@ func TestReduceFilterRules(t *testing.T) {
 					IPv6: iap("fd7a:115c:a1e0::100"),
 					User: types.User{Name: "user100"},
 					Hostinfo: &tailcfg.Hostinfo{
-						RoutableIPs: []netip.Prefix{types.ExitRouteV4, types.ExitRouteV6},
+						RoutableIPs: tsaddr.ExitRoutes(),
 					},
 				},
 			},
@@ -2036,7 +2019,7 @@ func TestReduceFilterRules(t *testing.T) {
 				IPv6: iap("fd7a:115c:a1e0::100"),
 				User: types.User{Name: "user100"},
 				Hostinfo: &tailcfg.Hostinfo{
-					RoutableIPs: []netip.Prefix{types.ExitRouteV4, types.ExitRouteV6},
+					RoutableIPs: tsaddr.ExitRoutes(),
 				},
 			},
 			peers: types.Nodes{
@@ -2132,7 +2115,7 @@ func TestReduceFilterRules(t *testing.T) {
 				IPv6: iap("fd7a:115c:a1e0::100"),
 				User: types.User{Name: "user100"},
 				Hostinfo: &tailcfg.Hostinfo{
-					RoutableIPs: []netip.Prefix{types.ExitRouteV4, types.ExitRouteV6},
+					RoutableIPs: tsaddr.ExitRoutes(),
 				},
 			},
 			peers: types.Nodes{
@@ -2383,7 +2366,7 @@ func TestReduceFilterRules(t *testing.T) {
 				Hostinfo: &tailcfg.Hostinfo{
 					RoutableIPs: []netip.Prefix{netip.MustParsePrefix("172.16.0.0/24")},
 				},
-				ForcedTags: types.StringList{"tag:access-servers"},
+				ForcedTags: []string{"tag:access-servers"},
 			},
 			peers: types.Nodes{
 				&types.Node{
@@ -2548,7 +2531,7 @@ func Test_getTags(t *testing.T) {
 				test.args.node,
 			)
 			for _, valid := range gotValid {
-				if !util.StringOrPrefixListContains(test.wantValid, valid) {
+				if !slices.Contains(test.wantValid, valid) {
 					t.Errorf(
 						"valids: getTags() = %v, want %v",
 						gotValid,
@@ -2559,7 +2542,7 @@ func Test_getTags(t *testing.T) {
 				}
 			}
 			for _, invalid := range gotInvalid {
-				if !util.StringOrPrefixListContains(test.wantInvalid, invalid) {
+				if !slices.Contains(test.wantInvalid, invalid) {
 					t.Errorf(
 						"invalids: getTags() = %v, want %v",
 						gotInvalid,
@@ -3180,7 +3163,7 @@ func Test_getFilteredByACLPeers(t *testing.T) {
 						Routes: types.Routes{
 							types.Route{
 								NodeID:    2,
-								Prefix:    types.IPPrefix(netip.MustParsePrefix("10.33.0.0/16")),
+								Prefix:    netip.MustParsePrefix("10.33.0.0/16"),
 								IsPrimary: true,
 								Enabled:   true,
 							},
@@ -3213,7 +3196,7 @@ func Test_getFilteredByACLPeers(t *testing.T) {
 					Routes: types.Routes{
 						types.Route{
 							NodeID:    2,
-							Prefix:    types.IPPrefix(netip.MustParsePrefix("10.33.0.0/16")),
+							Prefix:    netip.MustParsePrefix("10.33.0.0/16"),
 							IsPrimary: true,
 							Enabled:   true,
 						},
@@ -3223,13 +3206,6 @@ func Test_getFilteredByACLPeers(t *testing.T) {
 		},
 	}
 
-	// TODO(kradalby): Remove when we have gotten rid of IPPrefix type
-	prefixComparer := cmp.Comparer(func(x, y types.IPPrefix) bool {
-		return x == y
-	})
-	comparers := append([]cmp.Option{}, util.Comparers...)
-	comparers = append(comparers, prefixComparer)
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := FilterNodesByACL(
@@ -3237,7 +3213,7 @@ func Test_getFilteredByACLPeers(t *testing.T) {
 				tt.args.nodes,
 				tt.args.rules,
 			)
-			if diff := cmp.Diff(tt.want, got, comparers...); diff != "" {
+			if diff := cmp.Diff(tt.want, got, util.Comparers...); diff != "" {
 				t.Errorf("FilterNodesByACL() unexpected result (-want +got):\n%s", diff)
 			}
 		})
@@ -3323,7 +3299,7 @@ func TestSSHRules(t *testing.T) {
 					SSHUsers: map[string]string{
 						"autogroup:nonroot": "=",
 					},
-					Action: &tailcfg.SSHAction{Accept: true, AllowLocalPortForwarding: true},
+					Action: &tailcfg.SSHAction{Accept: true, AllowAgentForwarding: true, AllowLocalPortForwarding: true},
 				},
 				{
 					SSHUsers: map[string]string{
@@ -3334,7 +3310,7 @@ func TestSSHRules(t *testing.T) {
 							Any: true,
 						},
 					},
-					Action: &tailcfg.SSHAction{Accept: true, AllowLocalPortForwarding: true},
+					Action: &tailcfg.SSHAction{Accept: true, AllowAgentForwarding: true, AllowLocalPortForwarding: true},
 				},
 				{
 					Principals: []*tailcfg.SSHPrincipal{
@@ -3345,7 +3321,7 @@ func TestSSHRules(t *testing.T) {
 					SSHUsers: map[string]string{
 						"autogroup:nonroot": "=",
 					},
-					Action: &tailcfg.SSHAction{Accept: true, AllowLocalPortForwarding: true},
+					Action: &tailcfg.SSHAction{Accept: true, AllowAgentForwarding: true, AllowLocalPortForwarding: true},
 				},
 				{
 					SSHUsers: map[string]string{
@@ -3356,7 +3332,7 @@ func TestSSHRules(t *testing.T) {
 							Any: true,
 						},
 					},
-					Action: &tailcfg.SSHAction{Accept: true, AllowLocalPortForwarding: true},
+					Action: &tailcfg.SSHAction{Accept: true, AllowAgentForwarding: true, AllowLocalPortForwarding: true},
 				},
 			}},
 		},

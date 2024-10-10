@@ -11,6 +11,7 @@ import (
 	"github.com/puzpuzpuz/xsync/v3"
 	"github.com/rs/zerolog/log"
 	"gorm.io/gorm"
+	"tailscale.com/net/tsaddr"
 	"tailscale.com/util/set"
 )
 
@@ -48,7 +49,7 @@ func getRoutesByPrefix(tx *gorm.DB, pref netip.Prefix) (types.Routes, error) {
 	err := tx.
 		Preload("Node").
 		Preload("Node.User").
-		Where("prefix = ?", types.IPPrefix(pref)).
+		Where("prefix = ?", pref.String()).
 		Find(&routes).Error
 	if err != nil {
 		return nil, err
@@ -117,12 +118,12 @@ func EnableRoute(tx *gorm.DB, id uint64) (*types.StateUpdate, error) {
 		return enableRoutes(
 			tx,
 			&route.Node,
-			types.ExitRouteV4.String(),
-			types.ExitRouteV6.String(),
+			tsaddr.AllIPv4(),
+			tsaddr.AllIPv6(),
 		)
 	}
 
-	return enableRoutes(tx, &route.Node, netip.Prefix(route.Prefix).String())
+	return enableRoutes(tx, &route.Node, netip.Prefix(route.Prefix))
 }
 
 func DisableRoute(tx *gorm.DB,
@@ -285,7 +286,7 @@ func isUniquePrefix(tx *gorm.DB, route types.Route) bool {
 	var count int64
 	tx.Model(&types.Route{}).
 		Where("prefix = ? AND node_id != ? AND advertised = ? AND enabled = ?",
-			route.Prefix,
+			route.Prefix.String(),
 			route.NodeID,
 			true, true).Count(&count)
 
@@ -296,7 +297,7 @@ func getPrimaryRoute(tx *gorm.DB, prefix netip.Prefix) (*types.Route, error) {
 	var route types.Route
 	err := tx.
 		Preload("Node").
-		Where("prefix = ? AND advertised = ? AND enabled = ? AND is_primary = ?", types.IPPrefix(prefix), true, true, true).
+		Where("prefix = ? AND advertised = ? AND enabled = ? AND is_primary = ?", prefix.String(), true, true, true).
 		First(&route).Error
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err
@@ -391,7 +392,7 @@ func SaveNodeRoutes(tx *gorm.DB, node *types.Node) (bool, error) {
 		if !exists {
 			route := types.Route{
 				NodeID:     node.ID.Uint64(),
-				Prefix:     types.IPPrefix(prefix),
+				Prefix:     prefix,
 				Advertised: true,
 				Enabled:    false,
 			}
@@ -644,7 +645,7 @@ func EnableAutoApprovedRoutes(
 			Msg("looking up route for autoapproving")
 
 		for _, approvedAlias := range routeApprovers {
-			if approvedAlias == node.User.Name {
+			if approvedAlias == node.User.Username() {
 				approvedRoutes = append(approvedRoutes, advertisedRoute)
 			} else {
 				// TODO(kradalby): figure out how to get this to depend on less stuff

@@ -17,7 +17,7 @@ func TestResolveMagicDNS(t *testing.T) {
 
 	scenario, err := NewScenario(dockertestMaxWait())
 	assertNoErr(t, err)
-	defer scenario.Shutdown()
+	defer scenario.ShutdownAssertNoPanics(t)
 
 	spec := map[string]int{
 		"magicdns1": len(MustTestVersions),
@@ -86,7 +86,7 @@ func TestResolveMagicDNS(t *testing.T) {
 // All the containers are based on Alpine, meaning Tailscale
 // will overwrite the resolv.conf file.
 // On other platform, Tailscale will integrate with a dns manager
-// if available (like Systemd-Resolved).
+// if available (like systemd-resolved).
 func TestValidateResolvConf(t *testing.T) {
 	IntegrationSkip(t)
 
@@ -208,7 +208,7 @@ func TestValidateResolvConf(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			scenario, err := NewScenario(dockertestMaxWait())
 			assertNoErr(t, err)
-			defer scenario.Shutdown()
+			defer scenario.ShutdownAssertNoPanics(t)
 
 			spec := map[string]int{
 				"resolvconf1": 3,
@@ -242,5 +242,4 @@ func TestValidateResolvConf(t *testing.T) {
 			}
 		})
 	}
-
 }

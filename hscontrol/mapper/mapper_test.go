@@ -12,6 +12,8 @@ import (
 	"github.com/juanfont/headscale/hscontrol/policy"
 	"github.com/juanfont/headscale/hscontrol/types"
 	"gopkg.in/check.v1"
+	"gorm.io/gorm"
+	"tailscale.com/net/tsaddr"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/dnstype"
 	"tailscale.com/types/key"
@@ -28,6 +30,9 @@ func (s *Suite) TestGetMapResponseUserProfiles(c *check.C) {
 			Hostname: hostname,
 			UserID:   userid,
 			User: types.User{
+				Model: gorm.Model{
+					ID: userid,
+				},
 				Name: username,
 			},
 		}
@@ -72,14 +77,9 @@ func TestDNSConfigMapResponse(t *testing.T) {
 		{
 			magicDNS: true,
 			want: &tailcfg.DNSConfig{
-				Routes: map[string][]*dnstype.Resolver{
-					"shared1.foobar.headscale.net": {},
-					"shared2.foobar.headscale.net": {},
-					"shared3.foobar.headscale.net": {},
-				},
+				Routes: map[string][]*dnstype.Resolver{},
 				Domains: []string{
 					"foobar.headscale.net",
-					"shared1.foobar.headscale.net",
 				},
 				Proxied: true,
 			},
@@ -127,8 +127,7 @@ func TestDNSConfigMapResponse(t *testing.T) {
 
 			got := generateDNSConfig(
 				&types.Config{
-					DNSConfig:             &dnsConfigOrig,
-					DNSUserNameInMagicDNS: true,
+					DNSConfig: &dnsConfigOrig,
 				},
 				baseDomain,
 				nodeInShared1,
@@ -195,19 +194,19 @@ func Test_fullMapResponse(t *testing.T) {
 		Hostinfo:   &tailcfg.Hostinfo{},
 		Routes: []types.Route{
 			{
-				Prefix:     types.IPPrefix(netip.MustParsePrefix("0.0.0.0/0")),
+				Prefix:     tsaddr.AllIPv4(),
 				Advertised: true,
 				Enabled:    true,
 				IsPrimary:  false,
 			},
 			{
-				Prefix:     types.IPPrefix(netip.MustParsePrefix("192.168.0.0/24")),
+				Prefix:     netip.MustParsePrefix("192.168.0.0/24"),
 				Advertised: true,
 				Enabled:    true,
 				IsPrimary:  true,
 			},
 			{
-				Prefix:     types.IPPrefix(netip.MustParsePrefix("172.0.0.0/10")),
+				Prefix:     netip.MustParsePrefix("172.0.0.0/10"),
 				Advertised: true,
 				Enabled:    false,
 				IsPrimary:  true,
@@ -234,7 +233,7 @@ func Test_fullMapResponse(t *testing.T) {
 		Addresses: []netip.Prefix{netip.MustParsePrefix("100.64.0.1/32")},
 		AllowedIPs: []netip.Prefix{
 			netip.MustParsePrefix("100.64.0.1/32"),
-			netip.MustParsePrefix("0.0.0.0/0"),
+			tsaddr.AllIPv4(),
 			netip.MustParsePrefix("192.168.0.0/24"),
 		},
 		DERP:              "127.3.3.40:0",
@@ -244,11 +243,11 @@ func Test_fullMapResponse(t *testing.T) {
 		PrimaryRoutes:     []netip.Prefix{netip.MustParsePrefix("192.168.0.0/24")},
 		LastSeen:          &lastSeen,
 		MachineAuthorized: true,
-		Capabilities: []tailcfg.NodeCapability{
-			tailcfg.CapabilityFileSharing,
-			tailcfg.CapabilityAdmin,
-			tailcfg.CapabilitySSH,
-			tailcfg.NodeAttrDisableUPnP,
+
+		CapMap: tailcfg.NodeCapMap{
+			tailcfg.CapabilityFileSharing: []tailcfg.RawMessage{},
+			tailcfg.CapabilityAdmin:       []tailcfg.RawMessage{},
+			tailcfg.CapabilitySSH:         []tailcfg.RawMessage{},
 		},
 	}
 
@@ -299,11 +298,11 @@ func Test_fullMapResponse(t *testing.T) {
 		PrimaryRoutes:     []netip.Prefix{},
 		LastSeen:          &lastSeen,
 		MachineAuthorized: true,
-		Capabilities: []tailcfg.NodeCapability{
-			tailcfg.CapabilityFileSharing,
-			tailcfg.CapabilityAdmin,
-			tailcfg.CapabilitySSH,
-			tailcfg.NodeAttrDisableUPnP,
+
+		CapMap: tailcfg.NodeCapMap{
+			tailcfg.CapabilityFileSharing: []tailcfg.RawMessage{},
+			tailcfg.CapabilityAdmin:       []tailcfg.RawMessage{},
+			tailcfg.CapabilitySSH:         []tailcfg.RawMessage{},
 		},
 	}
 

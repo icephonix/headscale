@@ -41,19 +41,23 @@ jobs:
           - TestResolveMagicDNS
           - TestValidateResolvConf
           - TestDERPServerScenario
+          - TestDERPServerWebsocketScenario
           - TestPingAllByIP
           - TestPingAllByIPPublicDERP
           - TestAuthKeyLogoutAndRelogin
           - TestEphemeral
+          - TestEphemeralInAlternateTimezone
           - TestEphemeral2006DeletedTooQuickly
           - TestPingAllByHostname
           - TestTaildrop
           - TestExpireNode
           - TestNodeOnlineStatus
           - TestPingAllByIPManyUpDown
+          - Test2118DeletingOnlineNodePanics
           - TestEnablingRoutes
           - TestHASubnetRouterFailover
           - TestEnableDisableAutoApprovedRoute
+          - TestAutoApprovedSubRoute2068
           - TestSubnetRouteACL
           - TestHeadscale
           - TestCreateTailscale

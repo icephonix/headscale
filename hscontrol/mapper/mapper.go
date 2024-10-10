@@ -15,7 +15,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/juanfont/headscale/hscontrol/db"
 	"github.com/juanfont/headscale/hscontrol/notifier"
 	"github.com/juanfont/headscale/hscontrol/policy"
@@ -95,10 +94,10 @@ func generateUserProfiles(
 	node *types.Node,
 	peers types.Nodes,
 ) []tailcfg.UserProfile {
-	userMap := make(map[string]types.User)
-	userMap[node.User.Name] = node.User
+	userMap := make(map[uint]types.User)
+	userMap[node.User.ID] = node.User
 	for _, peer := range peers {
-		userMap[peer.User.Name] = peer.User // not worth checking if already is there
+		userMap[peer.User.ID] = peer.User // not worth checking if already is there
 	}
 
 	var profiles []tailcfg.UserProfile
@@ -121,32 +120,6 @@ func generateDNSConfig(
 	}
 
 	dnsConfig := cfg.DNSConfig.Clone()
-
-	// if MagicDNS is enabled
-	if dnsConfig.Proxied {
-		if cfg.DNSUserNameInMagicDNS {
-			// Only inject the Search Domain of the current user
-			// shared nodes should use their full FQDN
-			dnsConfig.Domains = append(
-				dnsConfig.Domains,
-				fmt.Sprintf(
-					"%s.%s",
-					node.User.Name,
-					baseDomain,
-				),
-			)
-
-			userSet := mapset.NewSet[types.User]()
-			userSet.Add(node.User)
-			for _, p := range peers {
-				userSet.Add(p.User)
-			}
-			for _, user := range userSet.ToSlice() {
-				dnsRoute := fmt.Sprintf("%v.%v", user.Name, baseDomain)
-				dnsConfig.Routes[dnsRoute] = nil
-			}
-		}
-	}
 
 	addNextDNSMetadata(dnsConfig.Resolvers, node)
 
@@ -227,7 +200,7 @@ func (m *Mapper) FullMapResponse(
 	return m.marshalMapResponse(mapRequest, resp, node, mapRequest.Compress, messages...)
 }
 
-// ReadOnlyResponse returns a MapResponse for the given node.
+// ReadOnlyMapResponse returns a MapResponse for the given node.
 // Lite means that the peers has been omitted, this is intended
 // to be used to answer MapRequests with OmitPeers set to true.
 func (m *Mapper) ReadOnlyMapResponse(
@@ -552,7 +525,7 @@ func appendPeerChanges(
 	}
 
 	// If there are filter rules present, see if there are any nodes that cannot
-	// access eachother at all and remove them from the peers.
+	// access each-other at all and remove them from the peers.
 	if len(packetFilter) > 0 {
 		changed = policy.FilterNodesByACL(node, changed, packetFilter)
 	}
@@ -596,7 +569,7 @@ func appendPeerChanges(
 	} else {
 		// This is a hack to avoid sending an empty list of packet filters.
 		// Since tailcfg.PacketFilter has omitempty, any empty PacketFilter will
-		// be omitted, causing the client to consider it unchange, keeping the
+		// be omitted, causing the client to consider it unchanged, keeping the
 		// previous packet filter. Worst case, this can cause a node that previously
 		// has access to a node to _not_ loose access if an empty (allow none) is sent.
 		reduced := policy.ReduceFilterRules(node, packetFilter)

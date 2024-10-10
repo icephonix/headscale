@@ -41,7 +41,7 @@ func (api headscaleV1APIServer) GetUser(
 	ctx context.Context,
 	request *v1.GetUserRequest,
 ) (*v1.GetUserResponse, error) {
-	user, err := api.h.db.GetUser(request.GetName())
+	user, err := api.h.db.GetUserByName(request.GetName())
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +70,7 @@ func (api headscaleV1APIServer) RenameUser(
 		return nil, err
 	}
 
-	user, err := api.h.db.GetUser(request.GetNewName())
+	user, err := api.h.db.GetUserByName(request.GetNewName())
 	if err != nil {
 		return nil, err
 	}
@@ -205,17 +205,18 @@ func (api headscaleV1APIServer) RegisterNode(
 		return nil, err
 	}
 
-	node, err := db.Write(api.h.db.DB, func(tx *gorm.DB) (*types.Node, error) {
-		return db.RegisterNodeFromAuthCallback(
-			tx,
-			api.h.registrationCache,
-			mkey,
-			request.GetUser(),
-			nil,
-			util.RegisterMethodCLI,
-			ipv4, ipv6,
-		)
-	})
+	user, err := api.h.db.GetUserByName(request.GetUser())
+	if err != nil {
+		return nil, fmt.Errorf("looking up user: %w", err)
+	}
+
+	node, err := api.h.db.RegisterNodeFromAuthCallback(
+		mkey,
+		types.UserID(user.ID),
+		nil,
+		util.RegisterMethodCLI,
+		ipv4, ipv6,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -373,7 +374,7 @@ func (api headscaleV1APIServer) RenameNode(
 	node, err := db.Write(api.h.db.DB, func(tx *gorm.DB) (*types.Node, error) {
 		err := db.RenameNode(
 			tx,
-			request.GetNodeId(),
+			types.NodeID(request.GetNodeId()),
 			request.GetNewName(),
 		)
 		if err != nil {
@@ -684,7 +685,7 @@ func (api headscaleV1APIServer) GetPolicy(
 	case types.PolicyModeDB:
 		p, err := api.h.db.GetPolicy()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("loading ACL from database: %w", err)
 		}
 
 		return &v1.GetPolicyResponse{
@@ -696,20 +697,20 @@ func (api headscaleV1APIServer) GetPolicy(
 		absPath := util.AbsolutePathFromConfigPath(api.h.cfg.Policy.Path)
 		f, err := os.Open(absPath)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("reading policy from path %q: %w", absPath, err)
 		}
 
 		defer f.Close()
 
 		b, err := io.ReadAll(f)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("reading policy from file: %w", err)
 		}
 
 		return &v1.GetPolicyResponse{Policy: string(b)}, nil
 	}
 
-	return nil, nil
+	return nil, fmt.Errorf("no supported policy mode found in configuration, policy.mode: %q", api.h.cfg.Policy.Mode)
 }
 
 func (api headscaleV1APIServer) SetPolicy(
@@ -774,7 +775,7 @@ func (api headscaleV1APIServer) DebugCreateNode(
 	ctx context.Context,
 	request *v1.DebugCreateNodeRequest,
 ) (*v1.DebugCreateNodeResponse, error) {
-	user, err := api.h.db.GetUser(request.GetUser())
+	user, err := api.h.db.GetUserByName(request.GetUser())
 	if err != nil {
 		return nil, err
 	}
@@ -802,18 +803,12 @@ func (api headscaleV1APIServer) DebugCreateNode(
 		return nil, err
 	}
 
-	givenName, err := api.h.db.GenerateGivenName(mkey, request.GetName())
-	if err != nil {
-		return nil, err
-	}
-
 	nodeKey := key.NewNode()
 
 	newNode := types.Node{
 		MachineKey: mkey,
 		NodeKey:    nodeKey.Public(),
 		Hostname:   request.GetName(),
-		GivenName:  givenName,
 		User:       *user,
 
 		Expiry:   &time.Time{},
@@ -829,7 +824,6 @@ func (api headscaleV1APIServer) DebugCreateNode(
 	api.h.registrationCache.Set(
 		mkey.String(),
 		newNode,
-		registerCacheExpiration,
 	)
 
 	return &v1.DebugCreateNodeResponse{Node: newNode.Proto()}, nil

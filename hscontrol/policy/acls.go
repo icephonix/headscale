@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/netip"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/tailscale/hujson"
 	"go4.org/netipx"
+	"tailscale.com/net/tsaddr"
 	"tailscale.com/tailcfg"
 )
 
@@ -45,7 +47,7 @@ func theInternet() *netipx.IPSet {
 
 	var internetBuilder netipx.IPSetBuilder
 	internetBuilder.AddPrefix(netip.MustParsePrefix("2000::/3"))
-	internetBuilder.AddPrefix(netip.MustParsePrefix("0.0.0.0/0"))
+	internetBuilder.AddPrefix(tsaddr.AllIPv4())
 
 	// Delete Private network addresses
 	// https://datatracker.ietf.org/doc/html/rfc1918
@@ -55,8 +57,8 @@ func theInternet() *netipx.IPSet {
 	internetBuilder.RemovePrefix(netip.MustParsePrefix("192.168.0.0/16"))
 
 	// Delete Tailscale networks
-	internetBuilder.RemovePrefix(netip.MustParsePrefix("fd7a:115c:a1e0::/48"))
-	internetBuilder.RemovePrefix(netip.MustParsePrefix("100.64.0.0/10"))
+	internetBuilder.RemovePrefix(tsaddr.TailscaleULARange())
+	internetBuilder.RemovePrefix(tsaddr.CGNATRange())
 
 	// Delete "cant find DHCP networks"
 	internetBuilder.RemovePrefix(netip.MustParsePrefix("fe80::/10")) // link-loca
@@ -292,7 +294,7 @@ func (pol *ACLPolicy) CompileSSHPolicy(
 		Reject:                   false,
 		Accept:                   true,
 		SessionDuration:          0,
-		AllowAgentForwarding:     false,
+		AllowAgentForwarding:     true,
 		HoldAndDelegate:          "",
 		AllowLocalPortForwarding: true,
 	}
@@ -401,7 +403,7 @@ func sshCheckAction(duration string) (*tailcfg.SSHAction, error) {
 		Reject:                   false,
 		Accept:                   true,
 		SessionDuration:          sessionLength,
-		AllowAgentForwarding:     false,
+		AllowAgentForwarding:     true,
 		HoldAndDelegate:          "",
 		AllowLocalPortForwarding: true,
 	}, nil
@@ -593,6 +595,11 @@ func (pol *ACLPolicy) ExpandAlias(
 // excludeCorrectlyTaggedNodes will remove from the list of input nodes the ones
 // that are correctly tagged since they should not be listed as being in the user
 // we assume in this function that we only have nodes from 1 user.
+//
+// TODO(kradalby): It is quite hard to understand what this function is doing,
+// it seems like it trying to ensure that we dont include nodes that are tagged
+// when we look up the nodes owned by a user.
+// This should be refactored to be more clear as part of the Tags work in #1369
 func excludeCorrectlyTaggedNodes(
 	aclPolicy *ACLPolicy,
 	nodes types.Nodes,
@@ -603,7 +610,7 @@ func excludeCorrectlyTaggedNodes(
 	for tag := range aclPolicy.TagOwners {
 		owners, _ := expandOwnersFromTag(aclPolicy, user)
 		ns := append(owners, user)
-		if util.StringOrPrefixListContains(ns, user) {
+		if slices.Contains(ns, user) {
 			tags = append(tags, tag)
 		}
 	}
@@ -611,17 +618,16 @@ func excludeCorrectlyTaggedNodes(
 	for _, node := range nodes {
 		found := false
 
-		if node.Hostinfo == nil {
-			continue
-		}
+		if node.Hostinfo != nil {
+			for _, t := range node.Hostinfo.RequestTags {
+				if slices.Contains(tags, t) {
+					found = true
 
-		for _, t := range node.Hostinfo.RequestTags {
-			if util.StringOrPrefixListContains(tags, t) {
-				found = true
-
-				break
+					break
+				}
 			}
 		}
+
 		if len(node.ForcedTags) > 0 {
 			found = true
 		}
@@ -737,15 +743,7 @@ func (pol *ACLPolicy) expandUsersFromGroup(
 				ErrInvalidGroup,
 			)
 		}
-		grp, err := util.NormalizeToFQDNRulesConfigFromViper(group)
-		if err != nil {
-			return []string{}, fmt.Errorf(
-				"failed to normalize group %q, err: %w",
-				group,
-				ErrInvalidGroup,
-			)
-		}
-		users = append(users, grp)
+		users = append(users, group)
 	}
 
 	return users, nil
@@ -779,7 +777,7 @@ func (pol *ACLPolicy) expandIPsFromTag(
 
 	// check for forced tags
 	for _, node := range nodes {
-		if util.StringOrPrefixListContains(node.ForcedTags, alias) {
+		if slices.Contains(node.ForcedTags, alias) {
 			node.AppendToIPSet(&build)
 		}
 	}
@@ -811,7 +809,7 @@ func (pol *ACLPolicy) expandIPsFromTag(
 				continue
 			}
 
-			if util.StringOrPrefixListContains(node.Hostinfo.RequestTags, alias) {
+			if slices.Contains(node.Hostinfo.RequestTags, alias) {
 				node.AppendToIPSet(&build)
 			}
 		}
@@ -934,7 +932,7 @@ func (pol *ACLPolicy) TagsOfNode(
 			}
 			var found bool
 			for _, owner := range owners {
-				if node.User.Name == owner {
+				if node.User.Username() == owner {
 					found = true
 				}
 			}
@@ -958,7 +956,7 @@ func (pol *ACLPolicy) TagsOfNode(
 func filterNodesByUser(nodes types.Nodes, user string) types.Nodes {
 	var out types.Nodes
 	for _, node := range nodes {
-		if node.User.Name == user {
+		if node.User.Username() == user {
 			out = append(out, node)
 		}
 	}
@@ -979,7 +977,10 @@ func FilterNodesByACL(
 			continue
 		}
 
+		log.Printf("Checking if %s can access %s", node.Hostname, peer.Hostname)
+
 		if node.CanAccess(filter, nodes[index]) || peer.CanAccess(filter, node) {
+			log.Printf("CAN ACCESS %s can access %s", node.Hostname, peer.Hostname)
 			result = append(result, peer)
 		}
 	}

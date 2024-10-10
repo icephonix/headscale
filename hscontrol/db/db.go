@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -19,7 +20,14 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
+	"gorm.io/gorm/schema"
+	"tailscale.com/util/set"
+	"zgo.at/zcache/v2"
 )
+
+func init() {
+	schema.RegisterSerializer("text", TextSerialiser{})
+}
 
 var errDatabaseNotSupported = errors.New("database type not supported")
 
@@ -31,7 +39,9 @@ type KV struct {
 }
 
 type HSDatabase struct {
-	DB *gorm.DB
+	DB       *gorm.DB
+	cfg      *types.DatabaseConfig
+	regCache *zcache.Cache[string, types.Node]
 
 	baseDomain string
 }
@@ -41,6 +51,7 @@ type HSDatabase struct {
 func NewHeadscaleDatabase(
 	cfg types.DatabaseConfig,
 	baseDomain string,
+	regCache *zcache.Cache[string, types.Node],
 ) (*HSDatabase, error) {
 	dbConn, err := openDB(cfg)
 	if err != nil {
@@ -189,7 +200,7 @@ func NewHeadscaleDatabase(
 
 						type NodeAux struct {
 							ID            uint64
-							EnabledRoutes types.IPPrefixes
+							EnabledRoutes []netip.Prefix `gorm:"serializer:json"`
 						}
 
 						nodesAux := []NodeAux{}
@@ -212,7 +223,7 @@ func NewHeadscaleDatabase(
 								}
 
 								err = tx.Preload("Node").
-									Where("node_id = ? AND prefix = ?", node.ID, types.IPPrefix(prefix)).
+									Where("node_id = ? AND prefix = ?", node.ID, prefix).
 									First(&types.Route{}).
 									Error
 								if err == nil {
@@ -227,7 +238,7 @@ func NewHeadscaleDatabase(
 									NodeID:     node.ID,
 									Advertised: true,
 									Enabled:    true,
-									Prefix:     types.IPPrefix(prefix),
+									Prefix:     prefix,
 								}
 								if err := tx.Create(&route).Error; err != nil {
 									log.Error().Err(err).Msg("Error creating route")
@@ -256,9 +267,6 @@ func NewHeadscaleDatabase(
 
 						for item, node := range nodes {
 							if node.GivenName == "" {
-								normalizedHostname, err := util.NormalizeToFQDNRulesConfigFromViper(
-									node.Hostname,
-								)
 								if err != nil {
 									log.Error().
 										Caller().
@@ -268,7 +276,7 @@ func NewHeadscaleDatabase(
 								}
 
 								err = tx.Model(nodes[item]).Updates(types.Node{
-									GivenName: normalizedHostname,
+									GivenName: node.Hostname,
 								}).Error
 								if err != nil {
 									log.Error().
@@ -291,7 +299,12 @@ func NewHeadscaleDatabase(
 						return err
 					}
 
-					err = tx.AutoMigrate(&types.PreAuthKeyACLTag{})
+					type preAuthKeyACLTag struct {
+						ID           uint64 `gorm:"primary_key"`
+						PreAuthKeyID uint64
+						Tag          string
+					}
+					err = tx.AutoMigrate(&preAuthKeyACLTag{})
 					if err != nil {
 						return err
 					}
@@ -413,6 +426,65 @@ func NewHeadscaleDatabase(
 				},
 				Rollback: func(db *gorm.DB) error { return nil },
 			},
+			// denormalise the ACL tags for preauth keys back onto
+			// the preauth key table. We dont normalise or reuse and
+			// it is just a bunch of work for extra work.
+			{
+				ID: "202409271400",
+				Migrate: func(tx *gorm.DB) error {
+					preauthkeyTags := map[uint64]set.Set[string]{}
+
+					type preAuthKeyACLTag struct {
+						ID           uint64 `gorm:"primary_key"`
+						PreAuthKeyID uint64
+						Tag          string
+					}
+
+					var aclTags []preAuthKeyACLTag
+					if err := tx.Find(&aclTags).Error; err != nil {
+						return err
+					}
+
+					// Store the current tags.
+					for _, tag := range aclTags {
+						if preauthkeyTags[tag.PreAuthKeyID] == nil {
+							preauthkeyTags[tag.PreAuthKeyID] = set.SetOf([]string{tag.Tag})
+						} else {
+							preauthkeyTags[tag.PreAuthKeyID].Add(tag.Tag)
+						}
+					}
+
+					// Add tags column and restore the tags.
+					_ = tx.Migrator().AddColumn(&types.PreAuthKey{}, "tags")
+					for keyID, tags := range preauthkeyTags {
+						s := tags.Slice()
+						j, err := json.Marshal(s)
+						if err != nil {
+							return err
+						}
+						if err := tx.Model(&types.PreAuthKey{}).Where("id = ?", keyID).Update("tags", string(j)).Error; err != nil {
+							return err
+						}
+					}
+
+					// Drop the old table.
+					_ = tx.Migrator().DropTable(&preAuthKeyACLTag{})
+					return nil
+				},
+				Rollback: func(db *gorm.DB) error { return nil },
+			},
+			{
+				ID: "202407191627",
+				Migrate: func(tx *gorm.DB) error {
+					err := tx.AutoMigrate(&types.User{})
+					if err != nil {
+						return err
+					}
+
+					return nil
+				},
+				Rollback: func(db *gorm.DB) error { return nil },
+			},
 		},
 	)
 
@@ -421,7 +493,9 @@ func NewHeadscaleDatabase(
 	}
 
 	db := HSDatabase{
-		DB: dbConn,
+		DB:       dbConn,
+		cfg:      &cfg,
+		regCache: regCache,
 
 		baseDomain: baseDomain,
 	}
@@ -619,6 +693,10 @@ func (hsdb *HSDatabase) Close() error {
 	db, err := hsdb.DB.DB()
 	if err != nil {
 		return err
+	}
+
+	if hsdb.cfg.Type == types.DatabaseSqlite && hsdb.cfg.Sqlite.WriteAheadLog {
+		db.Exec("VACUUM")
 	}
 
 	return db.Close()
